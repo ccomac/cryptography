@@ -1,0 +1,115 @@
+name: Build cryptography wheel for Windows 7
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "cryptography git tag, branch, or commit"
+        required: true
+        default: "main"
+
+env:
+  BUILD_REQUIREMENTS_PATH: .github/requirements/build-requirements.txt
+  UV_REQUIREMENTS_PATH: .github/requirements/uv-requirements.txt
+  RUST_TARGET: x86_64-win7-windows-msvc
+  OPENSSL_DIR: C:/openssl-win64
+  OPENSSL_STATIC: "1"
+
+jobs:
+  win7-x64:
+    name: CPython abi3 for Windows 7 x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out cryptography
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pyca/cryptography
+          ref: ${{ inputs.version }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          architecture: x64
+        timeout-minutes: 3
+
+      # The Win7 target is Tier 3, so rustup does not provide a prebuilt std.
+      - name: Set up Rust nightly and standard-library sources
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Verify the Rust target
+        shell: bash
+        run: |
+          rustc --print cfg --target "$RUST_TARGET" | grep 'target_vendor="win7"'
+
+      - name: Download the official static OpenSSL build
+        uses: dawidd6/action-download-artifact@57aa996fc1713cc1579039614f4645a7f4841fd4 # v23
+        with:
+          repo: pyca/infra
+          workflow: build-windows-openssl.yml
+          branch: main
+          workflow_conclusion: success
+          name: openssl-win64
+          path: C:/openssl-win64/
+          github_token: ${{ github.token }}
+
+      - name: Install uv
+        shell: bash
+        run: python -m pip install -r "$UV_REQUIREMENTS_PATH"
+
+      - name: Build source distribution
+        shell: bash
+        run: |
+          uv build \
+            --sdist \
+            --require-hashes \
+            --build-constraint="$BUILD_REQUIREMENTS_PATH"
+
+      - name: Build Windows 7 wheel
+        shell: bash
+        run: |
+          SDIST="$(find dist -maxdepth 1 -name 'cryptography-*.tar.gz' -print -quit)"
+          test -n "$SDIST"
+          mkdir wheelhouse
+
+          uv build \
+            --wheel \
+            --require-hashes \
+            --build-constraint="$BUILD_REQUIREMENTS_PATH" \
+            --config-settings=build-args=--features=pyo3/abi3-py39 \
+            --config-settings=build-args=--target="$RUST_TARGET" \
+            --config-settings=build-args=-Zbuild-std=std,panic_abort \
+            "$SDIST" \
+            -o wheelhouse/
+
+      - name: Smoke-test the wheel
+        shell: bash
+        run: |
+          uv venv .venv
+          uv pip install \
+            --python .venv/Scripts/python.exe \
+            --require-hashes \
+            -r "$BUILD_REQUIREMENTS_PATH"
+          uv pip install \
+            --python .venv/Scripts/python.exe \
+            cryptography \
+            --no-index \
+            --find-links wheelhouse/
+          .venv/Scripts/python.exe -c \
+            "from cryptography.hazmat.backends.openssl.backend import backend; print(backend.openssl_version_text())"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cryptography-win7-x64-cp39-abi3
+          path: wheelhouse/
+          if-no-files-found: error
