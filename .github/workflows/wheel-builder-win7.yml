@@ -9,14 +9,12 @@ on:
       version:
         description: "cryptography git tag, branch, or commit"
         required: true
-        default: "main"
+        default: "50.0.2"
 
 env:
   BUILD_REQUIREMENTS_PATH: .github/requirements/build-requirements.txt
   UV_REQUIREMENTS_PATH: .github/requirements/uv-requirements.txt
   RUST_TARGET: x86_64-win7-windows-msvc
-  OPENSSL_DIR: C:/openssl-win64
-  OPENSSL_STATIC: "1"
 
 jobs:
   win7-x64:
@@ -41,7 +39,7 @@ jobs:
 
       # The Win7 target is Tier 3, so rustup does not provide a prebuilt std.
       - name: Set up Rust nightly and standard-library sources
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
           toolchain: nightly
           components: rust-src
@@ -52,7 +50,7 @@ jobs:
           rustc --print cfg --target "$RUST_TARGET" | grep 'target_vendor="win7"'
 
       - name: Download the official static OpenSSL build
-        uses: dawidd6/action-download-artifact@57aa996fc1713cc1579039614f4645a7f4841fd4 # v23
+        uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
         with:
           repo: pyca/infra
           workflow: build-windows-openssl.yml
@@ -61,6 +59,12 @@ jobs:
           name: openssl-win64
           path: C:/openssl-win64/
           github_token: ${{ github.token }}
+
+      - name: Configure OpenSSL
+        shell: bash
+        run: |
+          echo "OPENSSL_DIR=C:/openssl-win64" >> "$GITHUB_ENV"
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
 
       - name: Install uv
         shell: bash
@@ -88,28 +92,18 @@ jobs:
             --config-settings=build-args=--features=pyo3/abi3-py39 \
             --config-settings=build-args=--target="$RUST_TARGET" \
             --config-settings=build-args=-Zbuild-std=std,panic_abort \
+            --config-settings=build-args=--sbom-include="C:/openssl-win64/sbom.json" \
             "$SDIST" \
             -o wheelhouse/
 
       - name: Smoke-test the wheel
-        shell: bash
-        run: |
-          uv venv .venv
-          uv pip install \
-            --python .venv/Scripts/python.exe \
-            --require-hashes \
-            -r "$BUILD_REQUIREMENTS_PATH"
-          uv pip install \
-            --python .venv/Scripts/python.exe \
-            cryptography \
-            --no-index \
-            --find-links wheelhouse/
-          .venv/Scripts/python.exe -c \
-            "from cryptography.hazmat.backends.openssl.backend import backend; print(backend.openssl_version_text())"
+        uses: ./.github/actions/wheel-smoketest
+        with:
+          build-requirements-path: ${{ env.BUILD_REQUIREMENTS_PATH }}
 
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cryptography-win7-x64-cp39-abi3
+          name: cryptography-${{ inputs.version }}-win7-x64-cp39-abi3
           path: wheelhouse/
           if-no-files-found: error
